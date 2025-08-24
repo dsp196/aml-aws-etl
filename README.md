@@ -20,36 +20,72 @@ The project mimics a real-world AML monitoring system, where suspicious financia
 
 ## Architecture
 
-### Step 0 – Data Transfer (GCP → AWS)
-- Original AML dataset was provided as a zipped CSV file on Google Cloud Storage (GCS).  
-- Process:  
-  1. Download dataset from GCS bucket.  
-  2. Decompress (unzip) locally or in a GCP VM.  
-  3. Upload extracted CSV files to AWS S3 (Bronze Layer).  
 
-### Bronze Layer (Raw Data)
-- Source: IBM AML transactions (CSV files).  
-- Stored in: Amazon S3 (`s3://ibmrawaml/bronze/`).  
-- Format: Raw CSV, unpartitioned.  
-- Catalog: AWS Glue Crawler was used to automatically infer schema and register the dataset in the AWS Glue Data Catalog, making it queryable via Athena.  
+## 1. Data Ingestion
+- **Source:** Original zipped dataset stored in **Google Cloud Storage (GCP Bucket)**.  
+- **Process:**  
+  - Data was decompressed in GCP.  
+  - Transferred to **AWS S3** using `gsutil` → `aws s3 cp` or via storage transfer.  
+- **Destination:** Raw data stored in S3 bucket → `s3://ibmrawaml/raw/`.  
 
-### Silver Layer (Curated Transactions)
-- Processing: PySpark on EMR  
-- Transformations:  
-  - Parse `timestamp` into `yr`, `mo`, `day` partitions  
-  - Standardize schema (bank IDs, account IDs, currencies, amounts)  
-  - Remove null/invalid rows  
-- Storage: S3 in Parquet format with Snappy compression  
-- Table: `aml_silver_transactions` (partitioned by `yr`, `mo`, `day`)  
-- Catalog: Glue Crawler updates schema after each load.
+---
 
+## 2. Bronze Layer (Raw Zone)
+- Data is stored **as-is** in S3 (CSV format).  
+- No transformations are applied at this stage.  
+- Used primarily for **archival** and **data lineage tracking**.  
 
-## Gold Layer Tables
+---
 
-- **aml_gold_corridors** – Summarizes transaction volumes and values between sending and receiving banks to identify dominant corridors.  
-- **aml_gold_daily** – Provides daily transaction KPIs such as total count, laundering ratio, and aggregated amounts.  
-- **aml_gold_fanout_idx** – Flags accounts with multiple distinct recipients, used to detect potential layering/fan-out patterns.  
-- **aml_gold_fx** – Captures foreign exchange transaction metrics, including total amounts, transaction counts, and spread indicators.  
-- **aml_gold_fx_expanded** – Splits FX corridors into payment and receiving currencies for detailed cross-currency analysis.  
-- **aml_gold_hourly** – Breaks down transactions by hour of the day to highlight intraday activity patterns.  
-- **Date** – Calendar dimension table for enabling time-series analysis and building relationships across fact tables.  
+## 3. Silver Layer (Curated / Clean Zone)
+- **Processing:**  
+  - **AWS EMR (PySpark)** jobs parse the CSVs.  
+  - Timestamps are normalized.  
+  - Partitioning applied by **Year (yr), Month (mo), Day (day)** for query optimization.  
+
+- **Storage:**  
+  - Written back to S3 in **Parquet + Snappy compression**.  
+  - Location: `s3://ibmrawaml/Spark_curated_day/`.  
+
+- **AWS Glue Crawler:**  
+  - Runs on the S3 curated folder.  
+  - Auto-discovers schema.  
+  - Registers metadata into **AWS Glue Data Catalog**.  
+  - Table: `aml_silver_transactions`.  
+
+---
+
+## 4. Gold Layer (Analytics Zone)
+Gold tables are built from Silver data using **aggregations and business rules** for dashboarding and ML.  
+All transformations done in **PySpark (EMR)** and written to **S3 in Parquet**, cataloged in **Athena**.  
+
+Gold tables include:  
+
+1. **aml_gold_corridors** → Transaction corridors (sender ↔ receiver bank pairs).  
+2. **aml_gold_daily** → Daily aggregated stats (txn count, laundering ratio, avg amounts).  
+3. **aml_gold_fanout_idx** → Fan-out analysis (# of receivers per sender).  
+4. **aml_gold_fx** → Currency corridor analytics.  
+5. **aml_gold_fx_expanded** → Separated payment and receiving currencies for FX analysis.  
+6. **aml_gold_hourly** → Hourly transaction distribution.  
+7. **Date** → Calendar dimension for time-series reporting.  
+
+---
+
+## 5. Query Layer (Athena)
+- All Gold/Silver tables queried directly via **Amazon Athena**.  
+- Partition pruning ensures cost-effective queries.  
+- Enables **ad-hoc SQL analysis** and **Power BI integration**.  
+
+---
+
+## 6. Dashboarding (Power BI)
+- **Connection:** Power BI ↔ Athena using the **ODBC driver**.  
+- **Pages created:**  
+  - **Sender Network Analysis**  
+  - **FX Corridor Analysis**  
+  - **Hourly Activity**  
+  - **Interbank Flow**  
+  - **Daily Transactions**
+  - **Date dimension**
+
+---
